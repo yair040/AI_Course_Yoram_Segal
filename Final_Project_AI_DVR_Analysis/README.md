@@ -1,139 +1,162 @@
-Author: Yair Levi# 📹 AI-Powered DVR Security Camera Analysis
+# 🅿️ ParkGuard AI
 
-> **Multi-Agent Natural Language Search & Automated Email Notification System**  
-> for Provision ISR DVR Surveillance Footage
- 
-> **Author: Yair Levi**
+> **DVR-Based Parking Occupancy Detection & Dual-Channel Alert System**  
+> *(formerly: AI-Powered DVR Security Camera Analysis)*
+
+**Author:** Yair Levi  
+**Moderator:** Segal Yoram, PhD
 
 ---
 
 ## 🧭 Overview
 
-This project builds an end-to-end AI pipeline that lets you search recorded security camera footage using plain language — no manual scrubbing required. You describe what you're looking for, an AI agent locates the matching video segment, and a second AI agent emails you the result automatically.
+**ParkGuard AI** is an end-to-end AI pipeline that downloads recorded footage from a **Provision ISR DVR**, detects vehicles in a user-defined parking zone using **Google MediaPipe**, and dispatches an alert via **Gmail API email and/or Telegram Bot** when a car occupies that zone for 5+ continuous minutes.
 
-**Example flow:**
+The detection zone is defined through a **conversational dialogue with a local LLM (Ollama + Llama 3.2)** running on WSL — no cloud API, no GUI tools, supports Hebrew.
+
 ```
-You:      "Find the moment someone entered through the back gate on Tuesday evening."
-Agent 1:  "Do you mean the main back gate or the parking lot gate?"
-You:      "The main back gate."
-Agent 1:  [searches footage] → Match found at 21:43:17
-Agent 2:  [sends email] → "Event detected at 21:43:17 — see attached thumbnail."
+User:     [configures camera=3, start=2025-05-20 08:00, end=2025-05-20 10:00]
+System:   [downloads segment from Provision ISR DVR → local MP4]
+System:   [shows first frame]
+LLM:      "Where in this frame is the parking spot you want to monitor?"
+User:     "Top-right corner, near the gate pillar"
+System:   [draws rectangle] → "Is this correct?"
+User:     "Move it slightly left" → [updated] → "Confirmed."
+          [processes all frames with MediaPipe vehicle detection]
+          [car in zone at 08:43 — timer starts]
+          [car still there at 08:48 — 5 minutes reached]
+Agent 2:  📧 Email → "Car detected in zone since 08:43. See attached frame."
+          🚗 Telegram → "Parking Alert — Camera 3, 08:48"
 ```
+
+---
+
+## 🏷️ Project Name Change
+
+| Old Name | New Name |
+|----------|----------|
+| AI-Powered DVR Security Camera Analysis | **ParkGuard AI** |
+
+The new name reflects the specific domain (parking zone enforcement), the AI-driven detection approach, and the guard/alert function. The full technical subtitle is retained in formal documents.
 
 ---
 
 ## 🎯 Research Question
 
-> *What is an effective method for using AI agents to locate relevant segments in surveillance video based on natural language instructions and automatically trigger email notifications when a match is found?*
+> *What is an effective method for using AI agents to locate relevant segments in surveillance video based on natural language instructions and automatically trigger notifications — via email or Telegram — when a match is found?*
 
-See [`AI_DVR_PreparatoryReport.docx`](./docs/AI_DVR_PreparatoryReport.docx) for the full research framing, gap analysis, and methodology.
+Full research framing: [`ParkGuardAI_PreparatoryReport.docx`](./docs/ParkGuardAI_PreparatoryReport.docx)
+
+---
+
+## ⚙️ Functional Requirements
+
+| # | Requirement | Technology |
+|---|-------------|------------|
+| FR-1 | Download DVR segment by camera + time range | FFmpeg over RTSP/ONVIF |
+| FR-2 | Frame-by-frame vehicle detection | Google MediaPipe Object Detection |
+| FR-3 | Conversational zone selection (Hebrew/English) | Ollama + Llama 3.2 1B on WSL |
+| FR-4 | Detect car in zone for ≥5 continuous minutes | Python state machine + IoU |
+| FR-5 | No duplicate alerts while same car is present | Car continuity tracker |
+| FR-6 | Gatekeeper: min 10 minutes between alerts | Timestamp gatekeeper |
+| FR-7 | Statistics per run | pandas / CSV logger |
 
 ---
 
 ## 🏗️ System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          USER INTERFACE                             │
-│              (CLI / Web chat — Hebrew & English supported)          │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ natural language query
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        AGENT 1  (Query)                             │
-│  • Conversational clarification loop                                │
-│  • Formalises query → structured search parameters                  │
-│  • Model: GPT-4o / Claude                                           │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ {camera_id, time_range, description}
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     LAYER 1  (DVR Ingestion)                        │
-│  • Connects to Provision ISR DVR via RTSP or local NAS              │
-│  • Pulls recorded segments with FFmpeg / OpenCV                     │
-│  • Splits into overlapping 30-second chunks                         │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ video chunks
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     LAYER 3  (Detection)                            │
-│  • Temporal Video Grounding → [t_start, t_end]                      │
-│  • VLM zero-shot or fine-tuned VTG model                            │
-│  • Conservative-bias calibration step                               │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ detection result + confidence
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        AGENT 2  (Notify)                            │
-│  • Composes email: timestamp + thumbnail + description              │
-│  • Sends via SMTP / Gmail API / SendGrid                            │
-│  • Logs event to local database                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  USER INPUT: camera_id, start_datetime, end_datetime, output_path    │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L0 — DVR INGESTION                                                  │
+│  FFmpeg pulls recorded segment from Provision ISR via RTSP/ONVIF     │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L1 — FRAME PROCESSING                                               │
+│  OpenCV + MediaPipe Object Detection → vehicle bounding boxes        │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              ▼ (first frame only)
+┌──────────────────────────────────────────────────────────────────────┐
+│  L2 — ZONE SELECTION  (Agent 1 — Local LLM)                          │
+│  Ollama + Llama 3.2 → ask → draw rectangle → iterate until confirmed │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L3 — OCCUPANCY STATE MACHINE                                        │
+│  IoU check → dwell ≥5 min → same car? → gatekeeper (10 min)         │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L4 — DUAL-CHANNEL NOTIFICATION  (Agent 2)                           │
+│  📧 Gmail API  +  🚗 Telegram Bot API  (independently configurable)  │
+└──────────────────────────────────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L5 — STATISTICS                                                     │
+│  JSON/CSV: detections, dwell times, alerts per channel, gatekeeper  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## ✨ What Makes This Project Different
+## 📦 Related Open-Source GitHub Projects
 
-This project addresses **6 gaps** not covered by existing research (OmAgent, VideoAgent2, SPOT!, UNC Charlotte VLM pipeline):
+ParkGuard AI builds on design patterns and algorithms from these six projects:
 
-| Gap | Description |
-|-----|-------------|
-| **G-1** | First integration layer specifically built for **Provision ISR DVR** hardware (RTSP recorded-segment retrieval) |
-| **G-2** | **Conversational multi-turn Agent 1** — asks clarifying questions before committing to retrieval |
-| **G-3** | **End-to-end latency benchmarking** on consumer DVR hardware |
-| **G-4** | **Hebrew / RTL natural-language query support** — absent from all reviewed literature |
-| **G-5** | Open reproducible implementation of the USPTO Patent 12,367,677 two-model architecture |
-| **G-6** | **Conservative-bias mitigation** for VLM zero-shot detection on real CCTV footage |
+| Ref | Repository | Stars | Stack | What We Adapt |
+|-----|-----------|-------|-------|---------------|
+| [GH1] | [SoftServeInc/smartparking](https://github.com/SoftServeInc/smartparking) | ★30 | Python, Docker, MQTT, CNN | Multi-service pipeline architecture; frame windowing strategy |
+| [GH2] | [DeepParking/DeepParking](https://github.com/DeepParking/DeepParking) | ★~50 | Python, Redis, REST API | Capture cadence (1 image/15–20s) to reduce CPU load |
+| [GH3] | [bhupender0415/CarParkingDetection](https://github.com/bhupender0415/CarParkingDetection) | ★~15 | Python, OpenCV | Preprocessing pipeline; red/green rectangle overlay |
+| [GH4] | [mbdelaresma/automated-parking-management-computer-vision](https://github.com/mbdelaresma/automated-parking-management-computer-vision) | ★~20 | Python, YOLOv4, OpenCV | **Timer + unique car ID pattern** (closest existing system) |
+| [GH5] | [yashchinchole/Car-Parking-Space-Counter](https://github.com/yashchinchole/Car-Parking-Space-Counter) | ★~30 | Python, OpenCV, CVZone, Haar | Lightweight Haar baseline; pixel-count threshold fallback |
+| [GH6] | [benarnav/parking-monitor](https://github.com/benarnav/parking-monitor) | ★~15 | Python, OpenCV | Dwell-time tracking per region; color-based car identity |
 
-Full analysis in [`AI_DVR_PreparatoryReport.docx`](./docs/AI_DVR_PreparatoryReport.docx) — Section 3.
+**What ParkGuard AI adds beyond all six:** Provision ISR DVR integration, conversational LLM zone selection, Hebrew support, email + Telegram dual-channel alerts, 10-minute gatekeeper, open reproducible implementation.
 
 ---
 
 ## 📁 Project Structure
 
 ```
-ai-dvr-analysis/
+parkguard-ai/
 │
-├── README.md                        ← You are here
-│
+├── README.md
 ├── docs/
-│   ├── AI_DVR_PreparatoryReport.docx    ← Full preparatory report
-│   └── AI_DVR_LiteratureResources.docx  ← 14 academic references (Q1/Q2, 2023–2025)
+│   └── ParkGuardAI_PreparatoryReport.docx
 │
 ├── src/
 │   ├── ingestion/
-│   │   ├── rtsp_puller.py           ← Connect to Provision ISR DVR via RTSP
-│   │   ├── segment_chunker.py       ← Split footage into overlapping chunks
-│   │   └── nas_reader.py            ← Read from local NAS storage
-│   │
-│   ├── agents/
-│   │   ├── agent1_query.py          ← Conversational query agent (LLM)
-│   │   └── agent2_notify.py         ← Email notification agent
-│   │
+│   │   ├── dvr_downloader.py       ← Provision ISR RTSP/ONVIF download
+│   │   └── frame_extractor.py      ← OpenCV frame pipeline
 │   ├── detection/
-│   │   ├── vtg_model.py             ← Temporal video grounding
-│   │   ├── vlm_detector.py          ← VLM zero-shot detection (CLIP-based)
-│   │   └── calibrator.py            ← Conservative-bias mitigation
-│   │
-│   └── pipeline.py                  ← End-to-end pipeline orchestrator
+│   │   ├── mediapipe_detector.py   ← MediaPipe Object Detection wrapper
+│   │   └── iou_utils.py            ← IoU + zone overlap logic
+│   ├── agents/
+│   │   ├── agent1_zone_selector.py ← Ollama LLM zone dialogue
+│   │   └── agent2_notifier.py      ← Email + Telegram dispatcher
+│   ├── occupancy/
+│   │   ├── state_machine.py        ← Dwell timer + gatekeeper
+│   │   └── car_tracker.py          ← Same-car continuity tracker
+│   ├── statistics/
+│   │   └── stats_logger.py         ← Event log + metrics
+│   └── pipeline.py                 ← Orchestrator
 │
 ├── config/
-│   ├── dvr_config.yaml              ← DVR connection settings (RTSP URL, credentials)
-│   ├── email_config.yaml            ← SMTP / Gmail API settings
-│   └── model_config.yaml            ← Model selection and thresholds
+│   ├── dvr_config.yaml
+│   ├── detection_config.yaml
+│   ├── email_config.yaml
+│   └── llm_config.yaml
 │
 ├── tests/
-│   ├── test_ingestion.py
-│   ├── test_agent1.py
-│   ├── test_detection.py
-│   └── test_agent2.py
-│
 ├── notebooks/
-│   └── exploration.ipynb            ← Exploratory analysis and model evaluation
-│
+│   └── exploration.ipynb
 ├── requirements.txt
-└── .env.example                     ← Environment variable template
+└── .env.example
 ```
 
 ---
@@ -142,57 +165,54 @@ ai-dvr-analysis/
 
 ### Prerequisites
 
-- Python 3.10+
-- FFmpeg installed and in PATH
-- Access to a Provision ISR DVR (RTSP stream URL or NAS path)
-- OpenAI or Anthropic API key (for Agent 1 & Agent 2)
-- Gmail / SMTP credentials (for email notifications)
+| Requirement | Notes |
+|-------------|-------|
+| Python 3.10+ | |
+| FFmpeg | In PATH |
+| WSL 2 (Ubuntu 22.04) | For Ollama |
+| Ollama | `ollama pull llama3.2:1b` |
+| Provision ISR DVR | RTSP/ONVIF access |
+| Google account | Gmail API OAuth2 |
+| Telegram Bot | Create via @BotFather |
 
-### Installation
+### Install
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/ai-dvr-analysis.git
-cd ai-dvr-analysis
-
-# 2. Create a virtual environment
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
+git clone https://github.com/your-org/parkguard-ai.git
+cd parkguard-ai
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# 4. Copy and fill in environment variables
-cp .env.example .env
-# Edit .env with your DVR credentials, API keys, and email settings
-```
-
-### Configuration
-
-Edit `config/dvr_config.yaml` with your Provision ISR details:
-
-```yaml
-dvr:
-  rtsp_url: "rtsp://<username>:<password>@<dvr-ip>:<port>/cam/realmonitor?channel=1&subtype=0"
-  nas_path: null               # Optional: local NAS mount path
-  chunk_duration_sec: 30
-  chunk_overlap_sec: 5
-  cameras:
-    - id: 1
-      label: "Front entrance"
-    - id: 2
-      label: "Back gate"
+cp .env.example .env   # fill in credentials
+wsl -- ollama pull llama3.2:1b
 ```
 
 ### Run
 
 ```bash
-# Start the interactive pipeline
-python src/pipeline.py
-
-# You will be prompted by Agent 1:
-# > What would you like to find in the footage?
+python src/pipeline.py \
+  --camera 3 \
+  --start "2025-05-20 08:00:00" \
+  --end   "2025-05-20 10:00:00" \
+  --output ./downloads/
 ```
+
+---
+
+## 🔔 Notification Configuration
+
+```env
+# Email
+EMAIL_ENABLED=true
+EMAIL_SENDER=yourproject@gmail.com
+EMAIL_RECIPIENT=alert@yourdomain.com
+
+# Telegram
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
+TELEGRAM_CHAT_ID=your_chat_or_group_id
+```
+
+Both channels can be enabled simultaneously. Each sends a frame thumbnail. The 10-minute gatekeeper applies across both channels combined.
 
 ---
 
@@ -200,14 +220,15 @@ python src/pipeline.py
 
 | Phase | Title | Status |
 |-------|-------|--------|
-| 1 | DVR Integration & Ingestion | 🔲 Not started |
-| 2 | Agent 1 — Conversational Query | 🔲 Not started |
-| 3 | Detection Module | 🔲 Not started |
-| 4 | Agent 2 — Email Notification | 🔲 Not started |
-| 5 | Integration & Evaluation | 🔲 Not started |
-
-Update the status emoji as work progresses:  
-`🔲 Not started` → `🔄 In progress` → `✅ Complete`
+| 1 | DVR Ingestion (FFmpeg + RTSP) | 🔲 Not started |
+| 2 | MediaPipe Detection Module | 🔲 Not started |
+| 3 | Agent 1 — LLM Zone Selection | 🔲 Not started |
+| 3b | Hebrew RTL Support | 🔲 Not started |
+| 4 | Occupancy State Machine | 🔲 Not started |
+| 5 | Agent 2 — Gmail Notification | 🔲 Not started |
+| 5b | Agent 2 — Telegram Notification | 🔲 Not started |
+| 6 | Statistics Module | 🔲 Not started |
+| 7 | Integration & Evaluation | 🔲 Not started |
 
 ---
 
@@ -215,78 +236,30 @@ Update the status emoji as work progresses:
 
 | # | Metric | Target |
 |---|--------|--------|
-| M-1 | Temporal localisation accuracy (IoU) | > 0.5 on held-out footage |
-| M-2 | Alert precision (true positives / total alerts) | ≥ 58% improvement over motion-detection baseline |
-| M-3 | End-to-end latency (query → email) | < 60 seconds on DVR hardware |
-| M-4 | Dialogue turns before retrieval | ≤ 2 clarification rounds on average |
-| M-5 | Hebrew/English accuracy parity | < 5% accuracy gap |
+| M-1 | Detection precision | > 0.85 |
+| M-2 | Occupancy event recall | > 0.90 |
+| M-3 | Alert precision | > 0.95 |
+| M-4 | Dwell-time accuracy | ±30s on > 90% of events |
+| M-5 | End-to-end latency (1-hr segment) | < 5 min |
+| M-6 | Zone selection dialogue turns | ≤ 2 on average |
+| M-7 | Hebrew vs English accuracy | < 5% IoU gap |
+| M-8 | Telegram delivery latency | < 3 seconds |
 
 ---
 
-## 📚 Academic Literature
+## 📚 Key References
 
-All references are documented in [`docs/AI_DVR_LiteratureResources.docx`](./docs/AI_DVR_LiteratureResources.docx).  
-All 14 papers are **Q1 or Q2 ranked**, published **2023–2025**, and **freely accessible**.
+Full 19 academic + 6 GitHub references in [`ParkGuardAI_PreparatoryReport.docx`](./docs/ParkGuardAI_PreparatoryReport.docx).
 
-| Pillar | Key Paper | Free Link |
-|--------|-----------|-----------|
-| VAD Survey | Bao et al. 2024 — ACM Comp. Surveys | [arXiv 2405.10347](https://arxiv.org/abs/2405.10347) |
-| Real CCTV VAD | Yao et al. 2025 — IEEE conf. | [arXiv 2603.04727](https://arxiv.org/abs/2603.04727) |
-| LLM VAD Review | Zanella et al. 2024 — IEEE TPAMI | [arXiv 2412.18298](https://arxiv.org/abs/2412.18298) |
-| Temporal Grounding | Zhang et al. 2023 — ICCV | [arXiv 2307.10567](https://arxiv.org/abs/2307.10567) |
-| DVR Agent Loop | OmAgent 2024 — NeurIPS | [arXiv 2406.16620](https://arxiv.org/abs/2406.16620) |
-| Detect → Notify | USPTO Patent 12,367,677 | [Google Patents](https://patents.google.com/patent/US12367677B2) |
-| Full Pipeline | UNC Charlotte VLM 2025 | [arXiv 2508.11690](https://arxiv.org/abs/2508.11690) |
-
----
-
-## ⚙️ Environment Variables
-
-Copy `.env.example` to `.env` and fill in:
-
-```env
-# LLM Provider (choose one)
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-
-# DVR Connection
-DVR_RTSP_URL=rtsp://admin:password@192.168.1.100:554
-DVR_USERNAME=admin
-DVR_PASSWORD=your_password
-
-# Email Notification (Agent 2)
-EMAIL_SENDER=your@gmail.com
-EMAIL_RECIPIENT=alert@yourdomain.com
-GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-# Or use SMTP:
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-```
-
-> ⚠️ Never commit your `.env` file. It is listed in `.gitignore`.
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Phase 1 — Provision ISR RTSP ingestion layer
-- [ ] Phase 2 — Agent 1 conversational dialogue (English)
-- [ ] Phase 2b — Hebrew / RTL support for Agent 1
-- [ ] Phase 3 — VTG detection module + calibration
-- [ ] Phase 4 — Agent 2 email notification
-- [ ] Phase 5 — End-to-end evaluation & benchmarking
-- [ ] Phase 6 — Multi-camera support
-- [ ] Phase 7 — Web UI dashboard
-
----
-
-## 📄 Documents
-
-| Document | Purpose |
-|----------|---------|
-| [`AI_DVR_PreparatoryReport.docx`](./docs/AI_DVR_PreparatoryReport.docx) | Research question, gap analysis, methodology, architecture |
-| [`AI_DVR_LiteratureResources.docx`](./docs/AI_DVR_LiteratureResources.docx) | 14 academic references with DOIs, rankings, and access links |
-| [`README.md`](./README.md) | This file — project overview and getting started guide |
+| # | Source | Link |
+|---|--------|------|
+| [3] | Bao et al. 2024 — VAD Survey (ACM Q1) | [arXiv 2405.10347](https://arxiv.org/abs/2405.10347) |
+| [2] | Yao et al. 2025 — LLMs on Real CCTV | [arXiv 2603.04727](https://arxiv.org/abs/2603.04727) |
+| [8] | OmAgent 2024 — CCTV Agent Loop | [arXiv 2406.16620](https://arxiv.org/abs/2406.16620) |
+| [13] | USPTO Patent 12,367,677 | [Google Patents](https://patents.google.com/patent/US12367677B2) |
+| [16] | Google MediaPipe Object Detection | [ai.google.dev](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector) |
+| [19] | Telegram Bot API | [core.telegram.org](https://core.telegram.org/bots/api) |
+| [GH4] | Park EZ — closest GitHub system | [github.com/mbdelaresma/...](https://github.com/mbdelaresma/automated-parking-management-computer-vision) |
 
 ---
 
@@ -296,4 +269,5 @@ MIT License — see `LICENSE` for details.
 
 ---
 
-*Project initiated May 2025 · Author: Yair Levi · Academic literature: Q1/Q2 journals, 2023–2025*
+*ParkGuard AI · May 2025 · Author: Yair Levi · Moderator: Segal Yoram*  
+*Formerly: AI-Powered DVR Security Camera Analysis*
